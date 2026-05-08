@@ -1,0 +1,16 @@
+[video]
+source = "videos/video1.mp4"
+output = "output/result.avi"
+fps = 20.0
+codec = "XVID"
+
+[filters]
+use_median = true
+use_gaussian = false
+median_kernel = 5
+gaussian_kernel = [5, 5]
+
+[window]
+processed_window_name = "Processed Video"
+normal_max_height = 700
+fullscreen_toggle_key = "f"
