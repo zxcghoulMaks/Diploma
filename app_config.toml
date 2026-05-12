@@ -1,16 +1,36 @@
 [video]
 source = "videos/video1.mp4"
 output = "output/result.avi"
-fps = 20.0
-codec = "XVID"
+fps = 0.0
+codec = "MJPG"
 
 [filters]
-use_median = true
+use_median = false
 use_gaussian = false
 median_kernel = 5
 gaussian_kernel = [5, 5]
 
+[detection]
+enabled_object_classes = ["person"]
+model_path = "models/yolov8n.onnx"
+model_input_size = [640, 640]
+processing_stride = 2
+detection_interval = 3
+confidence_threshold = 0.30
+nms_threshold = 0.3
+min_size = [8, 24]
+track_iou_threshold = 0.2
+track_max_missed_cycles = 3
+box_color = [0, 255, 0]
+box_thickness = 2
+font_scale = 0.7
+font_path = "C:/Windows/Fonts/arial.ttf"
+
+[detection.labels]
+person = "Людина"
+dog = "Собака"
+
 [window]
-processed_window_name = "Processed Video"
+processed_window_name = "Оброблене відео"
 normal_max_height = 700
 fullscreen_toggle_key = "f"

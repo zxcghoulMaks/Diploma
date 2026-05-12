@@ -1,34 +1,41 @@
 from __future__ import annotations
 
+import ctypes
+import sys
+
 import cv2
 import numpy as np
 
 
+# Керує вікном OpenCV: показом кадрів, масштабуванням і перемиканням fullscreen.
 class DisplayWindow:
     def __init__(self, name: str, frame_size: tuple[int, int], normal_max_height: int) -> None:
         self.name = name
+        self.window_key = "video_processor_window" if sys.platform == "win32" else name
         self.frame_width, self.frame_height = frame_size
         self.normal_max_height = normal_max_height
         self.fullscreen_mode = False
+        self._unicode_title_applied = False
 
-        normal_scale = self.normal_max_height / self.frame_height
+        normal_scale = min(1.0, self.normal_max_height / self.frame_height)
         self.normal_width = int(self.frame_width * normal_scale)
         self.normal_height = int(self.frame_height * normal_scale)
 
-        cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.name, self.normal_width, self.normal_height)
+        cv2.namedWindow(self.window_key, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_key, self.normal_width, self.normal_height)
 
     def show(self, frame) -> bool:
         if not self.is_open():
             return False
 
         display_frame = self._build_display_frame(frame)
-        cv2.imshow(self.name, display_frame)
+        cv2.imshow(self.window_key, display_frame)
+        self._ensure_unicode_title()
         return True
 
     def is_open(self) -> bool:
         try:
-            return cv2.getWindowProperty(self.name, cv2.WND_PROP_VISIBLE) >= 1
+            return cv2.getWindowProperty(self.window_key, cv2.WND_PROP_VISIBLE) >= 1
         except cv2.error:
             return False
 
@@ -39,14 +46,17 @@ class DisplayWindow:
         self.fullscreen_mode = not self.fullscreen_mode
 
         if self.fullscreen_mode:
-            cv2.setWindowProperty(self.name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            cv2.setWindowProperty(self.window_key, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             return
 
-        cv2.setWindowProperty(self.name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.name, self.normal_width, self.normal_height)
+        cv2.setWindowProperty(self.window_key, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_key, self.normal_width, self.normal_height)
 
     def _build_display_frame(self, frame):
         if not self.fullscreen_mode:
+            if self.normal_width == frame.shape[1] and self.normal_height == frame.shape[0]:
+                return frame
+
             return cv2.resize(
                 frame,
                 (self.normal_width, self.normal_height),
@@ -74,7 +84,7 @@ class DisplayWindow:
 
     def _read_window_size(self, fallback_width: int, fallback_height: int) -> tuple[int, int]:
         try:
-            _, _, window_width, window_height = cv2.getWindowImageRect(self.name)
+            _, _, window_width, window_height = cv2.getWindowImageRect(self.window_key)
         except cv2.error:
             return fallback_width, fallback_height
 
@@ -82,3 +92,12 @@ class DisplayWindow:
             return fallback_width, fallback_height
 
         return window_width, window_height
+
+    def _ensure_unicode_title(self) -> None:
+        if self._unicode_title_applied or sys.platform != "win32":
+            return
+
+        window_handle = ctypes.windll.user32.FindWindowW(None, self.window_key)
+        if window_handle:
+            ctypes.windll.user32.SetWindowTextW(window_handle, self.name)
+            self._unicode_title_applied = True

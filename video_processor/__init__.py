@@ -1,4 +1,4 @@
-"""Application package for configurable video processing."""
+"""Пакет застосунку для налаштовуваної обробки відео."""
 
 from .app import run
 

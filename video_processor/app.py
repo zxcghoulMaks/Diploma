@@ -8,7 +8,8 @@ import cv2
 from .config import AppConfig, load_config
 from .display import DisplayWindow
 from .filters import apply_configured_filters
-from .video_io import create_video_writer, open_video_source, read_frame_size
+from .object_tracking import ObjectTrackingSystem
+from .video_io import create_video_writer, open_video_source, read_frame_size, read_source_fps
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "app_config.toml"
 ESCAPE_KEY = 27
@@ -16,10 +17,17 @@ ESCAPE_KEY = 27
 
 def run(config: AppConfig) -> None:
     capture = open_video_source(config.video.source)
+    source_fps = read_source_fps(capture)
     frame_width, frame_height = read_frame_size(capture)
+    tracking_system = (
+        ObjectTrackingSystem(config.detection)
+        if config.detection.enabled_object_classes
+        else None
+    )
+    output_fps = config.video.fps if config.video.fps > 0 else source_fps
     writer = create_video_writer(
         output_path=config.video.output,
-        fps=config.video.fps,
+        fps=output_fps,
         frame_width=frame_width,
         frame_height=frame_height,
         codec=config.video.codec,
@@ -31,6 +39,7 @@ def run(config: AppConfig) -> None:
     )
 
     toggle_keys = _toggle_keys(config.window.fullscreen_toggle_key)
+    display_frame_index = 0
 
     try:
         while True:
@@ -40,12 +49,25 @@ def run(config: AppConfig) -> None:
                 break
 
             processed_frame = apply_configured_filters(frame, config.filters)
+            if tracking_system is not None:
+                # Трекінг працює на вихідному кадрі, а рамки додаються до обробленого.
+                display_frame_index += 1
+                should_update_tracking = (
+                    display_frame_index == 1
+                    or display_frame_index % config.detection.processing_stride == 0
+                )
+                processed_frame = tracking_system.annotate(
+                    processed_frame,
+                    detection_frame=frame,
+                    run_detection=should_update_tracking,
+                )
+
             if not window.show(processed_frame):
                 break
 
             writer.write(processed_frame)
 
-            key = window.poll_key(25)
+            key = window.poll_key(1)
             if key == ESCAPE_KEY:
                 break
             if key in toggle_keys:
@@ -57,11 +79,11 @@ def run(config: AppConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Configurable OpenCV video processor")
+    parser = argparse.ArgumentParser(description="Налаштовуваний застосунок для обробки відео через OpenCV")
     parser.add_argument(
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
-        help="Path to the runtime configuration file",
+        help="Шлях до файлу конфігурації",
     )
     args = parser.parse_args(argv)
 

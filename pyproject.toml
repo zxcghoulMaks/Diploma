@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "video-processor"
 version = "0.1.0"
-description = "Configurable OpenCV video processing application"
+description = "Налаштовуваний застосунок для обробки відео через OpenCV"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
     "opencv-python>=4.8",
+    "Pillow>=10.0",
 ]
 
 [project.scripts]
