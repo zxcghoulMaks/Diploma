@@ -13,6 +13,8 @@ class VideoConfig:
     output: Path
     fps: float
     codec: str
+    realtime_preview: bool
+    preview_max_frame_drop: int
 
 
 # Описує, які фільтри треба застосувати до кожного кадру і з якими параметрами.
@@ -32,6 +34,7 @@ class DetectionConfig:
     model_input_size: tuple[int, int]
     processing_stride: int
     detection_interval: int
+    show_summary: bool
     confidence_threshold: float
     nms_threshold: float
     min_size: tuple[int, int]
@@ -76,6 +79,11 @@ def load_config(path: str | Path) -> AppConfig:
     output = _resolve_path(base_dir, video.get("output", "output/result.avi"))
     fps = float(video.get("fps", 0.0))
     codec = str(video.get("codec", "MJPG")).upper()
+    realtime_preview = bool(video.get("realtime_preview", False))
+    preview_max_frame_drop = _validate_non_negative_integer(
+        video.get("preview_max_frame_drop", 6),
+        "preview_max_frame_drop",
+    )
 
     median_kernel = _validate_odd_integer(filters.get("median_kernel", 5), "median_kernel")
     gaussian_kernel = _validate_gaussian_kernel(filters.get("gaussian_kernel", [5, 5]))
@@ -131,6 +139,8 @@ def load_config(path: str | Path) -> AppConfig:
             output=output,
             fps=fps,
             codec=codec,
+            realtime_preview=realtime_preview,
+            preview_max_frame_drop=preview_max_frame_drop,
         ),
         filters=FilterConfig(
             use_median=bool(filters.get("use_median", False)),
@@ -144,6 +154,7 @@ def load_config(path: str | Path) -> AppConfig:
             model_input_size=model_input_size,
             processing_stride=processing_stride,
             detection_interval=detection_interval,
+            show_summary=bool(detection.get("show_summary", True)),
             confidence_threshold=confidence_threshold,
             nms_threshold=nms_threshold,
             min_size=min_size,
@@ -189,6 +200,12 @@ def _validate_odd_integer(value: Any, field_name: str) -> int:
 def _validate_positive_integer(value: Any, field_name: str) -> int:
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field_name} має бути додатним цілим числом")
+    return value
+
+
+def _validate_non_negative_integer(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} РјР°С” Р±СѓС‚Рё РЅРµРІС–Рґ'С”РјРЅРёРј С†С–Р»РёРј С‡РёСЃР»РѕРј")
     return value
 
 

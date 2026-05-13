@@ -30,7 +30,6 @@ class ObjectTrackingSystem:
         source_frame = frame if detection_frame is None else detection_frame
         tracked_objects = self.track(source_frame, run_detection=run_detection)
         annotated_frame = frame.copy()
-        text_items: list[tuple[str, tuple[int, int]]] = []
 
         for tracked_object in tracked_objects:
             if not self._should_render_track(tracked_object):
@@ -43,12 +42,12 @@ class ObjectTrackingSystem:
                 self.config.box_thickness,
             )
 
-        summary = self._build_summary(tracked_objects)
-        text_items.append((summary, (10, 4)))
+        if not self.config.show_summary:
+            return annotated_frame
 
         return draw_unicode_texts(
             annotated_frame,
-            text_items,
+            [(self._build_summary(tracked_objects), (10, 4))],
             self.config.box_color,
             self._font_size(),
             self.config.font_path,
@@ -181,9 +180,9 @@ class ObjectTrackingSystem:
 
     def _create_tracker(self):
         tracker_names = (
-            "TrackerKCF_create",
             "TrackerMOSSE_create",
             "TrackerMIL_create",
+            "TrackerKCF_create",
             "TrackerCSRT_create",
         )
         namespaces = [cv2]
@@ -303,3 +302,6 @@ class ObjectTrackingSystem:
 
     def _font_size(self) -> int:
         return max(16, int(self.config.font_scale * 28))
+
+    def visible_track_count(self) -> int:
+        return sum(1 for track in self._tracks if self._should_render_track(track))

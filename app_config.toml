@@ -3,22 +3,25 @@ source = "videos/video1.mp4"
 output = "output/result.avi"
 fps = 0.0
 codec = "MJPG"
+realtime_preview = true
+preview_max_frame_drop = 6
 
 [filters]
-use_median = false
+use_median = true
 use_gaussian = false
-median_kernel = 5
+median_kernel = 3
 gaussian_kernel = [5, 5]
 
 [detection]
 enabled_object_classes = ["person"]
 model_path = "models/yolov8n.onnx"
 model_input_size = [640, 640]
-processing_stride = 2
-detection_interval = 3
-confidence_threshold = 0.30
+processing_stride = 4
+detection_interval = 12
+show_summary = false
+confidence_threshold = 0.35
 nms_threshold = 0.3
-min_size = [8, 24]
+min_size = [32, 64]
 track_iou_threshold = 0.2
 track_max_missed_cycles = 3
 box_color = [0, 255, 0]

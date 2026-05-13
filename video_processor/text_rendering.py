@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -71,6 +72,11 @@ def draw_unicode_text(
 
 
 def _load_font(font_size: int, font_path: str | None) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    return _load_font_cached(font_size, font_path)
+
+
+@lru_cache(maxsize=32)
+def _load_font_cached(font_size: int, font_path: str | None) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     if font_path:
         configured_font = Path(font_path)
         if configured_font.exists():

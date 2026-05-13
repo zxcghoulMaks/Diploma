@@ -34,7 +34,15 @@ class YOLOObjectDetector:
         blob, scale, pad_x, pad_y = self._build_blob(frame, input_width, input_height)
 
         self.net.setInput(blob)
-        outputs = self.net.forward()
+        try:
+            outputs = self.net.forward()
+        except cv2.error as error:
+            raise RuntimeError(
+                "OpenCV DNN не зміг виконати YOLO ONNX. "
+                f"Поточний model_input_size={self.config.model_input_size} не сумісний з цією моделлю. "
+                "Для bundled models/yolov8n.onnx використовуйте [640, 640] або перевизначте model_path "
+                "на ONNX-модель, експортовану під потрібний розмір."
+            ) from error
         predictions = self._reshape_predictions(outputs)
 
         if predictions.shape[1] in (6, 7):
