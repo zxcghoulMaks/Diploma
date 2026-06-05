@@ -9,27 +9,63 @@ from .config import DetectionConfig
 from .object_models import BoundingBox, DetectedObject
 
 
-COCO_CLASS_IDS = {
+DEFAULT_CLASS_IDS = {
     "person": 0,
     "dog": 16,
 }
 
 
-# Детектор об'єктів на базі YOLO ONNX через OpenCV DNN.
 class YOLOObjectDetector:
     def __init__(self, config: DetectionConfig) -> None:
         self.config = config
         self.model_path = Path(config.model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(
-                "Не знайдено файл моделі YOLO. "
-                f"Очікується файл: {self.model_path}"
+                "YOLO model file was not found. "
+                f"Expected file: {self.model_path}"
             )
 
         self.net = cv2.dnn.readNetFromONNX(str(self.model_path))
         self.enabled_class_ids = self._build_enabled_class_ids()
 
     def detect(self, frame) -> list[DetectedObject]:
+        detections = self._detect_single_frame(frame) if self.config.detect_full_frame else []
+        frame_height, frame_width = frame.shape[:2]
+
+        for x1, y1, x2, y2 in self.config.detection_regions:
+            x1 = max(0, min(x1, frame_width - 1))
+            y1 = max(0, min(y1, frame_height - 1))
+            x2 = max(x1 + 1, min(x2, frame_width))
+            y2 = max(y1 + 1, min(y2, frame_height))
+
+            crop = frame[y1:y2, x1:x2]
+            crop_detections = self._detect_single_frame(crop)
+            detections.extend(
+                self._offset_detection(detection, x1, y1, frame_width, frame_height)
+                for detection in crop_detections
+            )
+
+        detections = [
+            detection
+            for detection in detections
+            if not self._is_inside_excluded_region(detection.bounding_box)
+        ]
+        return self._merge_duplicate_detections(detections)
+
+    def _is_inside_excluded_region(self, bounding_box: BoundingBox) -> bool:
+        box_x1, box_y1, box_x2, box_y2 = bounding_box.as_xyxy()
+        box_area = max(1, bounding_box.width * bounding_box.height)
+
+        for x1, y1, x2, y2 in self.config.excluded_detection_regions:
+            intersection_width = max(0, min(box_x2, x2) - max(box_x1, x1))
+            intersection_height = max(0, min(box_y2, y2) - max(box_y1, y1))
+            intersection_area = intersection_width * intersection_height
+            if intersection_area / box_area >= 0.25:
+                return True
+
+        return False
+
+    def _detect_single_frame(self, frame) -> list[DetectedObject]:
         input_height, input_width = self.config.model_input_size
         blob, scale, pad_x, pad_y = self._build_blob(frame, input_width, input_height)
 
@@ -38,10 +74,10 @@ class YOLOObjectDetector:
             outputs = self.net.forward()
         except cv2.error as error:
             raise RuntimeError(
-                "OpenCV DNN не зміг виконати YOLO ONNX. "
-                f"Поточний model_input_size={self.config.model_input_size} не сумісний з цією моделлю. "
-                "Для bundled models/yolov8n.onnx використовуйте [640, 640] або перевизначте model_path "
-                "на ONNX-модель, експортовану під потрібний розмір."
+                "OpenCV DNN could not run YOLO ONNX. "
+                f"Current model_input_size={self.config.model_input_size} is not compatible with this model. "
+                "For bundled models/yolov8n.onnx use [640, 640], or provide an ONNX model "
+                "exported for the configured input size."
             ) from error
         predictions = self._reshape_predictions(outputs)
 
@@ -64,6 +100,49 @@ class YOLOObjectDetector:
             frame_height=frame.shape[0],
             confidence_threshold=self.config.confidence_threshold,
         )
+
+    def _offset_detection(
+        self,
+        detection: DetectedObject,
+        offset_x: int,
+        offset_y: int,
+        frame_width: int,
+        frame_height: int,
+    ) -> DetectedObject:
+        box = detection.bounding_box
+        x = max(0, min(box.x + offset_x, frame_width - 1))
+        y = max(0, min(box.y + offset_y, frame_height - 1))
+        width = max(1, min(box.width, frame_width - x))
+        height = max(1, min(box.height, frame_height - y))
+        return DetectedObject(
+            class_name=detection.class_name,
+            display_label=detection.display_label,
+            bounding_box=BoundingBox(x=x, y=y, width=width, height=height),
+            confidence=detection.confidence,
+        )
+
+    def _merge_duplicate_detections(self, detections: list[DetectedObject]) -> list[DetectedObject]:
+        if len(detections) <= 1:
+            return detections
+
+        merged: list[DetectedObject] = []
+        for class_name in sorted({detection.class_name for detection in detections}):
+            class_detections = [
+                detection for detection in detections if detection.class_name == class_name
+            ]
+            boxes = [list(detection.bounding_box.as_xywh()) for detection in class_detections]
+            scores = [detection.confidence for detection in class_detections]
+            kept_indices = cv2.dnn.NMSBoxes(
+                bboxes=boxes,
+                scores=scores,
+                score_threshold=self.config.confidence_threshold,
+                nms_threshold=self.config.nms_threshold,
+            )
+            if kept_indices is None or len(kept_indices) == 0:
+                continue
+            merged.extend(class_detections[index] for index in kept_indices.flatten().tolist())
+
+        return merged
 
     def _parse_raw_predictions(
         self,
@@ -133,28 +212,29 @@ class YOLOObjectDetector:
     def _build_enabled_class_ids(self) -> dict[int, str]:
         enabled: dict[int, str] = {}
         for class_name in self.config.enabled_object_classes:
-            if class_name not in COCO_CLASS_IDS:
-                supported_classes = ", ".join(sorted(COCO_CLASS_IDS))
+            if class_name not in DEFAULT_CLASS_IDS:
+                supported_classes = ", ".join(sorted(DEFAULT_CLASS_IDS))
                 raise ValueError(
-                    f"YOLO-детектор не має COCO id для класу '{class_name}'. "
-                    f"Підтримувані класи: {supported_classes}"
+                    f"YOLO detector has no class id for '{class_name}'. "
+                    f"Supported classes: {supported_classes}"
                 )
-            enabled[COCO_CLASS_IDS[class_name]] = class_name
+            enabled[DEFAULT_CLASS_IDS[class_name]] = class_name
         return enabled
 
     def _build_blob(self, frame, input_width: int, input_height: int) -> tuple[np.ndarray, float, float, float]:
         frame_height, frame_width = frame.shape[:2]
         scale = min(input_width / frame_width, input_height / frame_height)
-        resized_width = int(round(frame_width * scale))
-        resized_height = int(round(frame_height * scale))
+        resized_width = max(1, int(round(frame_width * scale)))
+        resized_height = max(1, int(round(frame_height * scale)))
+        resized_width = min(resized_width, input_width)
+        resized_height = min(resized_height, input_height)
 
-        resized_frame = cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
+        interpolation = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
+        resized_frame = cv2.resize(frame, (resized_width, resized_height), interpolation=interpolation)
         letterboxed_frame = np.full((input_height, input_width, 3), 114, dtype=np.uint8)
 
-        pad_x = (input_width - resized_width) / 2
-        pad_y = (input_height - resized_height) / 2
-        x_offset = int(round(pad_x))
-        y_offset = int(round(pad_y))
+        x_offset = (input_width - resized_width) // 2
+        y_offset = (input_height - resized_height) // 2
         letterboxed_frame[y_offset:y_offset + resized_height, x_offset:x_offset + resized_width] = resized_frame
 
         blob = cv2.dnn.blobFromImage(
@@ -164,21 +244,25 @@ class YOLOObjectDetector:
             swapRB=True,
             crop=False,
         )
-        return blob, scale, pad_x, pad_y
+        return blob, scale, float(x_offset), float(y_offset)
 
     def _reshape_predictions(self, outputs) -> np.ndarray:
         squeezed = np.squeeze(outputs)
         if squeezed.ndim != 2:
-            raise ValueError("YOLO повернув неочікувану форму виходу моделі")
+            raise ValueError("YOLO returned an unexpected model output shape")
 
-        if squeezed.shape[0] in (6, 7, 84, 85):
+        if squeezed.shape[0] in self._supported_prediction_widths():
             return squeezed.T
-        if squeezed.shape[1] in (6, 7, 84, 85):
+        if squeezed.shape[1] in self._supported_prediction_widths():
             return squeezed
 
         if squeezed.shape[0] > squeezed.shape[1]:
             return squeezed
         return squeezed.T
+
+    def _supported_prediction_widths(self) -> set[int]:
+        raw_prediction_widths = {4 + len(self.enabled_class_ids), 5 + len(self.enabled_class_ids)}
+        return {6, 7, 84, 85, *raw_prediction_widths}
 
     def _extract_class_score(self, prediction: np.ndarray) -> tuple[str | None, float]:
         has_objectness = len(prediction) >= 85
@@ -267,9 +351,11 @@ class YOLOObjectDetector:
         aspect_ratio = bounding_box.height / max(1, bounding_box.width)
         area = bounding_box.width * bounding_box.height
 
-        # Для людей відсікаємо занадто широкі або зовсім дрібні рамки,
-        # які часто з'являються на кутах, сходах або інших контрастних деталях.
-        return aspect_ratio >= 2.0 and area >= 500
+        return (
+            aspect_ratio >= self.config.person_min_aspect_ratio
+            and aspect_ratio <= self.config.person_max_aspect_ratio
+            and area >= self.config.person_min_area
+        )
 
     def _decode_postprocessed_prediction(
         self,

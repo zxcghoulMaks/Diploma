@@ -22,47 +22,66 @@ class ObjectTrackingSystem:
         self._match_iou_threshold = self.config.track_iou_threshold
         self._max_missed_detection_cycles = self.config.track_max_missed_cycles
         self._edge_margin_ratio = 0.06
-        self._detection_blend = 0.65
+        self._detection_blend = 1.0
         self._tracker_blend = 0.35
-        self._center_distance_threshold = 1.35
+        self._center_distance_threshold = 2.5
+        self._left_to_right_count = 0
+        self._right_to_left_count = 0
+        self._max_center_history = 80
+        self._min_motion_pixels = 8
+        self._min_motion_ratio = 0.02
+        self._render_missed_detection_cycles = self.config.track_max_missed_cycles
 
-    def annotate(self, frame, detection_frame=None, run_detection: bool = True):
+    def annotate(self, frame, detection_frame=None, run_detection: bool = True, foreground_mask=None):
         source_frame = frame if detection_frame is None else detection_frame
-        tracked_objects = self.track(source_frame, run_detection=run_detection)
+        tracked_objects = self.track(
+            source_frame,
+            run_detection=run_detection,
+            foreground_mask=foreground_mask,
+        )
         annotated_frame = frame.copy()
 
         for tracked_object in tracked_objects:
             if not self._should_render_track(tracked_object):
                 continue
-            cv2.rectangle(
-                annotated_frame,
-                tracked_object.bounding_box.top_left(),
-                tracked_object.bounding_box.bottom_right(),
-                self.config.box_color,
-                self.config.box_thickness,
+            self._draw_yolo_style_box(annotated_frame, tracked_object)
+
+        overlay_texts: list[tuple[str, tuple[int, int]]] = []
+        if self.config.count_direction_crossings:
+            overlay_texts.append(
+                (f"{self.config.count_left_to_right_label}: {self._left_to_right_count}", (10, 4))
+            )
+            overlay_texts.append(
+                (f"{self.config.count_right_to_left_label}: {self._right_to_left_count}", (10, 34))
             )
 
-        if not self.config.show_summary:
+        if self.config.show_summary:
+            summary_y = 4 + len(overlay_texts) * 30 if overlay_texts else 4
+            overlay_texts.append((self._build_summary(tracked_objects), (10, summary_y)))
+
+        if not overlay_texts:
             return annotated_frame
 
         return draw_unicode_texts(
             annotated_frame,
-            [(self._build_summary(tracked_objects), (10, 4))],
+            overlay_texts,
             self.config.box_color,
             self._font_size(),
             self.config.font_path,
         )
 
-    def track(self, frame, run_detection: bool = True) -> list[TrackedObject]:
+    def track(self, frame, run_detection: bool = True, foreground_mask=None) -> list[TrackedObject]:
         self._frame_index += 1
         for track in self._tracks:
             track.age_frames += 1
 
         self._update_trackers(frame)
 
+        # Зовнішній processing_stride і внутрішній detection_interval разом
+        # обмежують дорогу YOLO-детекцію, не зупиняючи відображення кадрів.
         if run_detection and self._should_run_detection(frame.shape[1], frame.shape[0]):
             detections = self._run_detectors(frame)
-            self._merge_detections_with_tracks(frame, detections)
+            self._merge_detections_with_tracks(frame, detections, foreground_mask)
 
         self._prune_lost_tracks()
         return list(self._tracks)
@@ -72,10 +91,12 @@ class ObjectTrackingSystem:
             return True
 
         for track in self._tracks:
-            if track.tracker is None:
+            if self.config.use_opencv_trackers and track.tracker is None:
                 return True
             if (
-                self._is_near_frame_edge(track.bounding_box, frame_width, frame_height)
+                self.config.use_opencv_trackers
+                and track.tracker is not None
+                and self._is_near_frame_edge(track.bounding_box, frame_width, frame_height)
                 and self._frame_index % 2 == 0
             ):
                 return True
@@ -85,14 +106,54 @@ class ObjectTrackingSystem:
     def _run_detectors(self, frame) -> list[DetectedObject]:
         return self.detector.detect(frame)
 
+    def _draw_yolo_style_box(
+        self,
+        frame,
+        tracked_object: TrackedObject,
+    ) -> None:
+        box = tracked_object.bounding_box
+        x1, y1 = box.top_left()
+        x2, y2 = box.bottom_right()
+        color = self.config.box_color
+        thickness = self.config.box_thickness
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+
+    def _has_motion_inside_box(self, bounding_box: BoundingBox, foreground_mask) -> bool:
+        mask_height, mask_width = foreground_mask.shape[:2]
+        x1 = max(0, min(bounding_box.x, mask_width - 1))
+        y1 = max(0, min(bounding_box.y, mask_height - 1))
+        x2 = max(x1 + 1, min(bounding_box.x + bounding_box.width, mask_width))
+        y2 = max(y1 + 1, min(bounding_box.y + bounding_box.height, mask_height))
+
+        box_mask = foreground_mask[y1:y2, x1:x2]
+        motion_pixels = cv2.countNonZero(box_mask)
+        box_area = max(1, box_mask.shape[0] * box_mask.shape[1])
+        return (
+            motion_pixels >= self._min_motion_pixels
+            and motion_pixels / box_area >= self._min_motion_ratio
+        )
+
     def _update_trackers(self, frame) -> None:
+        if not self.config.use_opencv_trackers:
+            for track in self._tracks:
+                track.tracker = None
+            return
+
         updated_tracks: list[TrackedObject] = []
         for track in self._tracks:
             if track.tracker is None:
                 updated_tracks.append(track)
                 continue
 
-            success, raw_box = track.tracker.update(frame)
+            try:
+                success, raw_box = track.tracker.update(frame)
+            except cv2.error:
+                track.tracker = None
+                track.missed_detection_cycles += 1
+                updated_tracks.append(track)
+                continue
+
             if not success:
                 track.tracker = None
                 track.missed_detection_cycles += 1
@@ -111,10 +172,12 @@ class ObjectTrackingSystem:
 
         self._tracks = updated_tracks
 
-    def _merge_detections_with_tracks(self, frame, detections: list[DetectedObject]) -> None:
+    def _merge_detections_with_tracks(self, frame, detections: list[DetectedObject], foreground_mask=None) -> None:
         unmatched_track_indices = set(range(len(self._tracks)))
         unmatched_detection_indices = set(range(len(detections)))
 
+        # Спочатку будуємо всі допустимі пари, потім жадібно забираємо найкращі.
+        # Це не дає одній детекції оновити кілька треків.
         scored_pairs: list[tuple[float, int, int]] = []
         for track_index, track in enumerate(self._tracks):
             for detection_index, detection in enumerate(detections):
@@ -143,6 +206,8 @@ class ObjectTrackingSystem:
             track.missed_detection_cycles = 0
             track.detection_hits += 1
             track.tracker = self._create_initialized_tracker(frame, detection.bounding_box)
+            self._record_track_center(track)
+            self._maybe_count_direction_crossing(track)
 
             unmatched_track_indices.remove(track_index)
             unmatched_detection_indices.remove(detection_index)
@@ -152,19 +217,27 @@ class ObjectTrackingSystem:
 
         for detection_index in unmatched_detection_indices:
             detection = detections[detection_index]
-            self._tracks.append(
-                TrackedObject(
-                    track_id=next(self._track_id_counter),
-                    class_name=detection.class_name,
-                    display_label=detection.display_label,
-                    bounding_box=detection.bounding_box,
-                    confidence=detection.confidence,
-                    tracker=self._create_initialized_tracker(frame, detection.bounding_box),
-                    missed_detection_cycles=0,
-                    age_frames=1,
-                    detection_hits=1,
-                )
+            if not self._should_start_new_track(detection, foreground_mask):
+                continue
+
+            track = TrackedObject(
+                track_id=next(self._track_id_counter),
+                class_name=detection.class_name,
+                display_label=detection.display_label,
+                bounding_box=detection.bounding_box,
+                confidence=detection.confidence,
+                tracker=self._create_initialized_tracker(frame, detection.bounding_box),
+                missed_detection_cycles=0,
+                age_frames=1,
+                detection_hits=1,
             )
+            self._record_track_center(track)
+            self._tracks.append(track)
+
+    def _should_start_new_track(self, detection: DetectedObject, foreground_mask) -> bool:
+        if detection.class_name != "person" or foreground_mask is None:
+            return True
+        return self._has_motion_inside_box(detection.bounding_box, foreground_mask)
 
     def _prune_lost_tracks(self) -> None:
         self._tracks = [
@@ -174,8 +247,14 @@ class ObjectTrackingSystem:
         ]
 
     def _create_initialized_tracker(self, frame, bounding_box: BoundingBox):
+        if not self.config.use_opencv_trackers:
+            return None
+
         tracker = self._create_tracker()
-        tracker.init(frame, bounding_box.as_xywh())
+        try:
+            tracker.init(frame, bounding_box.as_xywh())
+        except cv2.error:
+            return None
         return tracker
 
     def _create_tracker(self):
@@ -235,6 +314,8 @@ class ObjectTrackingSystem:
         iou = self._calculate_iou(tracked_box, detected_box)
         center_distance = self._normalized_center_distance(tracked_box, detected_box)
 
+        # Для маленьких людей IoU швидко падає навіть від зсуву на кілька пікселів,
+        # тому близькі центри також дозволяють продовжити трек.
         if iou < self._match_iou_threshold and center_distance > self._center_distance_threshold:
             return None
 
@@ -289,7 +370,66 @@ class ObjectTrackingSystem:
         return self._max_missed_detection_cycles + extra_cycles
 
     def _should_render_track(self, track: TrackedObject) -> bool:
-        return track.detection_hits >= 2 or track.confidence >= 0.55
+        if track.missed_detection_cycles > self._render_missed_detection_cycles:
+            return False
+        return (
+            track.detection_hits >= self.config.render_min_detection_hits
+            or track.confidence >= self.config.render_high_confidence_threshold
+        )
+
+    def _record_track_center(self, track: TrackedObject) -> None:
+        track.center_history.append(self._box_center(track.bounding_box))
+        if len(track.center_history) > self._max_center_history:
+            del track.center_history[:-self._max_center_history]
+
+    def _box_center(self, bounding_box: BoundingBox) -> tuple[float, float]:
+        return (
+            bounding_box.x + bounding_box.width / 2,
+            bounding_box.y + bounding_box.height / 2,
+        )
+
+    def _maybe_count_direction_crossing(self, track: TrackedObject) -> None:
+        if not self.config.count_direction_crossings:
+            return
+        if track.class_name != "person":
+            return
+        if not self._should_render_track(track) or len(track.center_history) < 2:
+            return
+
+        current_x, current_y = track.center_history[-1]
+        if not self._is_inside_count_zone(current_x, current_y):
+            return
+
+        line_x = self.config.count_line_x
+        left_edge = line_x - self.config.count_min_dx
+        right_edge = line_x + self.config.count_min_dx
+        # Гістерезис вимагає, щоб трек раніше був на достатній відстані від лінії.
+        # Це захищає лічильник від повторів через тремтіння рамки біля count_line_x.
+        previous_points = [
+            (x, y)
+            for x, y in track.center_history[:-1]
+            if self._is_inside_count_zone(x, y)
+        ]
+
+        if (
+            not track.counted_left_to_right
+            and current_x >= line_x
+            and any(x <= left_edge for x, _ in previous_points)
+        ):
+            track.counted_left_to_right = True
+            self._left_to_right_count += 1
+
+        if (
+            not track.counted_right_to_left
+            and current_x <= line_x
+            and any(x >= right_edge for x, _ in previous_points)
+        ):
+            track.counted_right_to_left = True
+            self._right_to_left_count += 1
+
+    def _is_inside_count_zone(self, x: float, y: float) -> bool:
+        x1, y1, x2, y2 = self.config.count_zone
+        return x1 <= x <= x2 and y1 <= y <= y2
 
     def _build_summary(self, tracked_objects: list[TrackedObject]) -> str:
         visible_tracks = [track for track in tracked_objects if self._should_render_track(track)]
@@ -305,3 +445,15 @@ class ObjectTrackingSystem:
 
     def visible_track_count(self) -> int:
         return sum(1 for track in self._tracks if self._should_render_track(track))
+
+    def left_to_right_count(self) -> int:
+        return self._left_to_right_count
+
+    def right_to_left_count(self) -> int:
+        return self._right_to_left_count
+
+    def total_crossing_count(self) -> int:
+        return self._left_to_right_count + self._right_to_left_count
+
+    def left_stair_climb_count(self) -> int:
+        return self._left_to_right_count

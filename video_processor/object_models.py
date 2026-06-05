@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # Описує рамку навколо знайденого об'єкта на кадрі.
@@ -45,3 +45,6 @@ class TrackedObject:
     missed_detection_cycles: int = 0
     age_frames: int = 0
     detection_hits: int = 1
+    center_history: list[tuple[float, float]] = field(default_factory=list)
+    counted_left_to_right: bool = False
+    counted_right_to_left: bool = False

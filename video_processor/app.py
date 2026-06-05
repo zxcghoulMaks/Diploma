@@ -7,6 +7,7 @@ import time
 
 import cv2
 
+from .background_model import GaussianMixtureBackgroundModel
 from .config import AppConfig, load_config
 from .display import DisplayWindow
 from .filters import apply_configured_filters
@@ -25,6 +26,11 @@ def run(config: AppConfig) -> None:
     tracking_system = (
         ObjectTrackingSystem(config.detection)
         if config.detection.enabled_object_classes
+        else None
+    )
+    background_model = (
+        GaussianMixtureBackgroundModel(config.background_model)
+        if config.background_model.enabled
         else None
     )
     output_fps = config.video.fps if config.video.fps > 0 else source_fps
@@ -63,9 +69,16 @@ def run(config: AppConfig) -> None:
                 break
 
             source_frame_index += 1
-            processed_frame = apply_configured_filters(frame, config.filters)
+            filtered_frame = apply_configured_filters(frame, config.filters)
+            processed_frame = filtered_frame if background_model is None else frame.copy()
+            foreground_mask = None
+            if background_model is not None:
+                foreground_mask = background_model.foreground_mask(filtered_frame)
+                processed_frame = background_model.annotate(processed_frame, foreground_mask)
+
             if tracking_system is not None:
                 display_frame_index += 1
+                # Детектор запускається рідше за цикл показу/запису, щоб зберегти FPS.
                 should_update_tracking = (
                     display_frame_index == 1
                     or display_frame_index % config.detection.processing_stride == 0
@@ -74,6 +87,7 @@ def run(config: AppConfig) -> None:
                     processed_frame,
                     detection_frame=frame,
                     run_detection=should_update_tracking,
+                    foreground_mask=foreground_mask,
                 )
 
             if not window.show(processed_frame):
